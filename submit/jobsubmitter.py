@@ -34,7 +34,7 @@ class JobSubmitter(object):
         for cand in glob.glob("*.sh") + glob.glob("../*.sh"):
             log.debug("Checking submit script candidate %s" % cand)
             if os.path.isfile(cand):
-                try: 
+                try:
                     with open(cand, 'r') as f:
                         if "SBATCH" in f.read():
                             candidates.append(cand)
