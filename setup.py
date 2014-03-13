@@ -6,5 +6,5 @@ setup(
     author_email = "surban@tum.de",
     version = "0.1",
     packages = ['submit'],
-    entry_points = {'console_scripts': [ 'submit = submit.main:run' ] },
+    entry_points = {'console_scripts': [ 'submit = submit.jobsubmitter:run' ] },
 )
