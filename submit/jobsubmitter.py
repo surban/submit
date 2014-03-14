@@ -7,50 +7,83 @@ import re
 
 from argparse import ArgumentParser
 from ConfigParser import ConfigParser
+import subprocess
 
-# logging
-log = logging.getLogger("jobsubmitter")
+log = None
+
+
+def arg_split(args, sep=","):
+    return [f.strip() for f in args.split(sep) if len(f) > 0]
 
 
 class SubmissionError(Exception):
     pass
 
 
+class Configuration(object):
+    def __init__(self, cfg_path):
+        self.cfg_path = cfg_path
+
+        self.runner = None
+        self.input_files = []
+        self.output_files = []
+        self.log_file = "output.txt"
+        self.gpu = 'no'
+        self.slurm_options = []
+
+        self.parse()
+        self.parse_slurm_options()
+
+    def parse(self):
+        with open(self.cfg_path, 'r') as f:
+            for line in f.readlines():
+                line = line.strip()
+                m = re.match(r"^#\s*SUBMIT:\s*([a-zA-Z\-]+)\s*=\s*(.*)$", line)
+                if m:
+                    name = m.group(1).lower()
+                    value = m.group(2).strip()
+
+                    if name == "runner":
+                        self.runner = value
+                    elif name == "input-files":
+                        self.input_files = arg_split(value)
+                    elif name == "output-files":
+                        self.output_files = arg_split(value)
+                    elif name == "log-file":
+                        self.log_file = value
+                    elif name == "gpu":
+                        value = value.lower()
+                        if value not in ['yes', 'prefer', 'no']:
+                            raise SubmissionError("GPU option %s not recognized" % value)
+                        self.gpu = value
+                    else:
+                        raise SubmissionError("submit option %s in config file not recognized" % name)
+        if not self.runner:
+            raise SubmissionError("required option runner was not specified in configuration file")
+
+    def parse_slurm_options(self):
+        """Reads SBATCH options from the specified configuration file."""
+        self.slurm_options = []
+        with open(self.cfg_path, 'r') as f:
+            for line in f.readlines():
+                m = re.match(r"^#\s*SBATCH (.*)$", line)
+                if m is not None:
+                    self.slurm_options.append(m.group(1).strip())
+
+
 class JobSubmitter(object):
-    def __init__(self, script=None, runner=None, cfg_files=[], input_files=[], output_files=[],
-                 update=False, slurm_log=None, slurm_options=None):
+    def __init__(self, script=None, cfg_files=[], update=False, log_file=None, slurm_options=None, gpu=None,
+                 prolog=None):
         self.script = script
-        self.runner = runner
         self.cfg_files = cfg_files
-        self.input_files = input_files
-        self.output_files = output_files
         self.update = update
-        self.slurm_log = slurm_log
+        self.log_file = log_file
         self.slurm_options = slurm_options
+        self.gpu = gpu
+        self.prolog = prolog
 
         log.debug("Using job batch script %s" % self.script)
         log.debug("Using slurm options: %s" % str(self.slurm_options))
-
-    @staticmethod
-    def find_submit_script():
-        candidates = []
-        for cand in glob.glob("*.sh") + glob.glob("../*.sh"):
-            log.debug("Checking submit script candidate %s" % cand)
-            if os.path.isfile(cand):
-                try:
-                    with open(cand, 'r') as f:
-                        if "SBATCH" in f.read():
-                            candidates.append(cand)
-                except IOError:
-                    pass
-
-        if len(candidates) == 1:
-            return candidates[0]
-        elif len(candidates) == 0:
-            raise SubmissionError("No submit script was specified and it could not be found automatically")
-        else:
-            raise SubmissionError("No submit script was specified and more than one candidates were found: "
-                                  + str(candidates))
 
     def find_config_file(self, directory):
         """Returns the first configuration file in the given directory."""
@@ -59,25 +92,6 @@ class JobSubmitter(object):
             if os.path.exists(cfg_path):
                 return cfg_path, filename
         return None, None
-
-    def get_runner_from_config_file(self, cfg_path):
-        """Reads the runner from the specified configuration file."""
-        with open(cfg_path, 'r') as f:
-            for line in f.readlines():
-                m = re.search("RUNNER:(.*)$", line)
-                if m is not None:
-                    return m.group(1).strip()
-        return None
-
-    def get_slurm_options_from_config_file(self, cfg_path):
-        """Reads SBATCH options from the specified configuration file."""
-        opts = []
-        with open(cfg_path, 'r') as f:
-            for line in f.readlines():
-                m = re.search("^#SBATCH (.*)$", line)
-                if m is not None:
-                    opts.append(m.group(1).strip())
-        return opts
 
     def get_mtimes(self, directory, files, ignore_missing=False):
         """Returns an array of the modification times of the specified files."""
@@ -97,123 +111,209 @@ class JobSubmitter(object):
             if not os.path.isfile(path):
                 raise SubmissionError("file %s is missing" % path)
 
+    def submit_job(self, job_name, log_path, opts, runner, cfg, device, xpu_twin):
+        """Submits to SLURM using sbatch and returns the job id."""
+        cmd = ["sbatch", "--job-name=" + job_name, "--output=" + log_path]
+        cmd += opts
+        cmd += [self.script, runner, cfg, device, str(xpu_twin), self.prolog]
+
+        log.debug("Executing: " + " ".join(cmd))
+        try:
+            output = subprocess.check_output(cmd)
+        except subprocess.CalledProcessError as e:
+            raise SubmissionError("sbatch failed")
+
+        m = re.search("Submitted batch job (\d+)", output)
+        if m:
+            return int(m.group(1))
+        else:
+            return SubmissionError("sbatch failed with unexpected output: " + output)
+
+    def cancel_job(self, job_id):
+        """Cancels the SLURM job with the given id."""
+        retval = subprocess.check_call(["scancel", str(job_id)])
+        if retval != 0:
+            raise SubmissionError("scancel failed for job %d" % job_id)
+
+    def release_job(self, job_id):
+        """Releases the held SLURM job with the given id."""
+        retval = subprocess.check_call(["scontrol", "release", str(job_id)])
+        if retval != 0:
+            raise SubmissionError("scontrol release failed for job %d" % job_id)
+
     def submit_directory(self, directory):
         """Submits the given directory to the job scheduler."""
         if not os.path.isdir(directory):
             raise SubmissionError("specified path is not a directory")
 
         cfg_path, cfg_filename = self.find_config_file(directory)
+        if not cfg_path:
+            raise SubmissionError("no config file found for directory %s" % directory)
         log.debug("Using configuration file %s" % cfg_path)
+        cfg = Configuration(cfg_path)
+        log.debug("parsed configuration: {" +
+                  ", ".join("%s: %s" % item for item in vars(cfg).items()) + "}")
 
-        if self.runner is not None:
-            runner = self.runner
+        # log file
+        if self.log_file:
+            log_file = self.log_file
         else:
-            if cfg_path is not None:
-                runner = self.get_runner_from_config_file(cfg_path)
-                if runner is None:
-                    raise SubmissionError("no runner specified on command line or in configuration file %s" %
-                                          cfg_path)
-            else:
-                raise SubmissionError("no runner specified and no configuration file was found")
-        log.debug("Using runner %s" % runner)
+            log_file = cfg.log_file
+        log_path = os.path.join(directory, log_file)
 
-        input_files = self.input_files[:]
-        if cfg_path is not None:
-            input_files.append(cfg_filename)
+        # input files
+        input_files = cfg.input_files[:]
+        input_files.append(cfg_filename)
         self.check_file_existance(directory, input_files)
 
+        # output files
+        output_files = cfg.output_files[:]
+        output_files.append(log_file)
+
+        # check modification times if update is specified
         input_mtimes = self.get_mtimes(directory, input_files, ignore_missing=False)
-        output_mtimes = self.get_mtimes(directory, self.output_files, ignore_missing=True)
+        output_mtimes = self.get_mtimes(directory, output_files, ignore_missing=True)
         if len(input_mtimes) > 0 and len(output_mtimes) > 0:
             if self.update and min(output_mtimes) > max(input_mtimes):
                 raise SubmissionError("output is up to date")
 
-        sbatch_opts = self.slurm_options[:]
-        if cfg_path is not None:
-            sbatch_opts += self.get_slurm_options_from_config_file(cfg_path)
-        opts_str = " ".join(["\"" + opt + "\"" for opt in sbatch_opts])
+        # slurm options
+        slurm_options = self.slurm_options[:]
+        slurm_options += cfg.slurm_options
 
-        out_path = os.path.join(directory, self.slurm_log)
-        if os.path.exists(out_path):
-            os.unlink(out_path)
+        # gpu
+        if self.gpu:
+            gpu = self.gpu
+        else:
+            gpu = cfg.gpu
 
-        cmdline = "sbatch --quiet \"--job-name=%s\" \"--output=%s\" %s \"%s\" \"%s\" \"%s\"" % \
-                  (directory, out_path, opts_str, self.script, runner, directory)
-        log.debug("Executing: " + cmdline)
-        os.system(cmdline)
+        # remove previous log
+        if os.path.exists(log_path):
+            os.unlink(log_path)
 
+        gpu_job_id = None
+        cpu_job_id = None
 
-def arg_split(args, sep):
-    return [f for f in args.split(sep) if len(f) > 0]
+        if gpu == 'yes':
+            slurm_options.append("--gres=gpu")
+            gpu_job_id = self.submit_job(directory, log_path, slurm_options, cfg.runner, directory, 'gpu', 0)
+        elif gpu == 'no':
+            cpu_job_id = self.submit_job(directory, log_path, slurm_options, cfg.runner, directory, 'cpu', 0)
+        elif gpu == 'prefer':
+            slurm_options.append("--hold")
+
+            gpu_options = slurm_options[:]
+            gpu_options.append("--gres=gpu")
+
+            while True:
+                # submit dummy job to get current slurm job id
+                dummy_id = self.submit_job(directory + "_dummy", log_path, slurm_options, cfg.runner, directory, 'cpu', 0)
+                gpu_job_id = dummy_id + 1
+                cpu_job_id = dummy_id + 2
+                log.debug("Dummy job id is %d, expecting gpu jobid=%d and cpu jobid=%d" %
+                          (dummy_id, gpu_job_id, cpu_job_id))
+
+                gpu_job_id_real = self.submit_job(directory + "(gpu)", log_path, gpu_options,
+                                                  cfg.runner, directory, 'gpu', cpu_job_id)
+                cpu_job_id_real = self.submit_job(directory + "(cpu)", log_path, slurm_options,
+                                                  cfg.runner, directory, 'cpu', gpu_job_id)
+                log.debug("Got gpu jobid=%d and cpu jobid=%d" %
+                          (gpu_job_id_real, cpu_job_id_real))
+
+                self.cancel_job(dummy_id)
+                if gpu_job_id == gpu_job_id_real and cpu_job_id == cpu_job_id_real:
+                    # job id okay. cancel dummy and release real jobs.
+                    log.debug("Got expected jobids.")
+                    self.release_job(gpu_job_id)
+                    self.release_job(cpu_job_id)
+                    break
+                else:
+                    # did not get expected job ids. cancel and retry.
+                    log.debug("Did not get expected jobids. Retrying...")
+                    self.cancel_job(gpu_job_id_real)
+                    self.cancel_job(cpu_job_id_real)
+
+        return cpu_job_id, gpu_job_id
 
 
 def run():
+    global log
+
     mydir = os.path.dirname(__file__)
-    cfg_parser = ConfigParser({"script": os.path.join(mydir, "job-script.sh"),
-                               "cfg-files": "cfg.py",
-                               "input-files": "",
-                               "output-files": "output.txt",
-                               "slurm-log": "output.txt",
+    cfg_parser = ConfigParser({"cfg-files": "cfg.py",
                                "slurm-options": "",
+                               "prolog": os.path.join(mydir, "prolog.sh"),
                                })
     cfg_parser.read("submit.cfg")
 
     arg_parser = ArgumentParser(description="Submit SLURM jobs.")
     arg_parser.add_argument("directories", metavar="directory", nargs='+',
                             help="directories to submit")
-    arg_parser.add_argument("--script", "-s", default=cfg_parser.get("DEFAULT", "script"),
-                            help="script to submit to SLURM using sbatch "
-                                 "(runner will be passed as first argument and directory name will be"
-                                 " passed as second argument)")
-    arg_parser.add_argument("--runner", "-r", default=None,
-                            help="program that runs the configuration "
-                                 "(if none is specified then it must be specified in the configuration file using the"
-                                 " marker RUNNER: )")
     arg_parser.add_argument("--update", "-u", action='store_true',
                             help="only submit job if input is more recent than output")
     arg_parser.add_argument("--cfg-files", "-c", default=cfg_parser.get("DEFAULT", "cfg-files"),
                             help="configuration files for each job")
-    arg_parser.add_argument("--input-files", "-i", default=cfg_parser.get("DEFAULT", "input-files"),
-                            help="input files for each job")
-    arg_parser.add_argument("--output-files", "-o", default=cfg_parser.get("DEFAULT", "output-files"),
-                            help="output files for each job")
-    arg_parser.add_argument("--slurm-log", "-l", default=cfg_parser.get("DEFAULT", "slurm-log"),
-                            help="file to redirect standard output and error to")
-    arg_parser.add_argument("--slurm-options", "-O", default=cfg_parser.get("DEFAULT", "slurm-options"),
-                            help="comma seperated options (without --) that should be passed to sbatch")
+    arg_parser.add_argument("--log-file", "-l",
+                            help="file to redirect standard output and error to. "
+                                 "Overrides the value specified in the job configuration file.")
+    arg_parser.add_argument("--slurm-option", "-O",
+                            default=arg_split(cfg_parser.get("DEFAULT", "slurm-options"), ","),
+                            action='append',
+                            help="option (without --) that should be passed to sbatch "
+                                 "(specify multiple times for more than one option)")
+    arg_parser.add_argument("--gpu", "-g",
+                            default=None, choices=["yes", "prefer", "no"],
+                            help="GPU access. "
+                                 "Specify 'yes' if the job requires a GPU to run. "
+                                 "Specify 'prefer' if the gpu can make use of a GPU but does not require it to run. "
+                                 "Specify 'no' if no GPU should be allocated. "
+                                 "Overrides the value specified in the job configuration file.")
+    arg_parser.add_argument("--prolog",
+                            default=cfg_parser.get("DEFAULT", "prolog"),
+                            help="script that should be sourced before executing the task. "
+                                 "Specify 'none' for no prolog script.")
     arg_parser.add_argument("--debug", action='store_true',
                             help="displays debug output")
     args = arg_parser.parse_args()
 
+    # initialize logging
+    logging.basicConfig()
+    log = logging.getLogger("jobsubmitter")
     if args.debug:
-        log_level = logging.DEBUG
+        log.setLevel(logging.DEBUG)
     else:
-        log_level = logging.WARNING
-    logging.basicConfig(level=log_level)
+        log.setLevel(logging.WARNING)
 
-    slurm_options = ["--" + o for o in arg_split(args.slurm_options, ",")]
+    slurm_options = ["--" + o for o in args.slurm_option]
+    prolog=args.prolog
+    if prolog and prolog == "none":
+        prolog = None
 
     try:
-        js = JobSubmitter(script=args.script,
-                          runner=args.runner,
+        js = JobSubmitter(script=os.path.join(mydir, "job-script.sh"),
                           cfg_files=arg_split(args.cfg_files, ","),
-                          input_files=arg_split(args.input_files, ","),
-                          output_files=arg_split(args.output_files, ","),
                           update=args.update,
-                          slurm_log=args.slurm_log,
-                          slurm_options=slurm_options)
+                          log_file=args.log_file,
+                          slurm_options=slurm_options,
+                          gpu=args.gpu,
+                          prolog=prolog)
     except SubmissionError as e:
         print e.message
         sys.exit(1)
 
     for directory in args.directories:
         print "%20s: " % directory,
+        if args.debug:
+            print
+        sys.stdout.flush()
         try:
-            sys.stdout.flush()
-            js.submit_directory(directory)
-            print "\r",
-            sys.stdout.flush()
-            #print "submitted"
+            cpu_id, gpu_id = js.submit_directory(directory)
+            if cpu_id and gpu_id:
+                print "cpu: %5d   gpu: %5d" % (cpu_id, gpu_id)
+            elif cpu_id:
+                print "%5d" % cpu_id
+            else:
+                print "%5d" % gpu_id
         except SubmissionError as e:
             print e.message
 
