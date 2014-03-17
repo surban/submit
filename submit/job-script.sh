@@ -1,9 +1,14 @@
 #!/bin/bash
-#SBATCH --signal=INT@60
+#SBATCH --signal=INT@300
 #SBATCH --open-mode=append
 
 function get_job_state {
     scontrol show job "$1" | grep JobState | cut -d" " -f4 | cut -d = -f2
+}
+
+function on_sigterm {
+    rm -f "$cfg/_running"
+    exit 1
 }
 
 runner="$1"
@@ -45,6 +50,10 @@ else
     fi
 fi
 
+trap on_sigterm TERM
+rm -f "$cfg/_finished" "$cfg/_failed" "$cfg/_requeued"
+touch "$cfg/_running"
+
 . "$prolog"
 
 echo
@@ -52,13 +61,24 @@ echo "Execution directory is $(pwd)"
 echo $runner "$cfg" "$cont"
 echo
 
-$runner "$cfg" "$cont"
+srun $runner "$cfg" "$cont"
+retval=$?
 
-if [ "$?" == "9" ] ; then
-    echo
+rm -f "$cfg/_running"
+echo
+echo "Exit code is $retval"
+
+if [ "$retval" == "0" ] ; then
+    touch "$cfg/_finished"
+elif [ "$?" == "9" ] ; then
     echo "Requeing job..."
+    touch "$cfg/_requeued"
     scontrol requeue $SLURM_JOB_ID
+else
+    touch "$cfg/_failed"
 fi
+
+exit $retval
 
 
 
