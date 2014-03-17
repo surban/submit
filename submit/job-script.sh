@@ -71,7 +71,7 @@ echo "Exit code is $retval"
 
 if [ "$retval" == "0" ] ; then
     touch "$cfg/_finished"
-elif [ "$?" == "9" ] ; then
+elif [ "$retval" == "9" ] ; then
     echo "Requeing job..."
     touch "$cfg/_requeued"
     scontrol requeue $SLURM_JOB_ID
