@@ -18,6 +18,7 @@ xpu_twin="$4"
 prolog="$5"
 
 echo "Job id is $SLURM_JOB_ID"
+echo "Hostname is $(hostname)"
 echo "Device is $device"
 
 if [ "$SLURM_RESTART_COUNT" != "" ] ; then
@@ -52,7 +53,7 @@ fi
 
 trap on_sigterm TERM
 rm -f "$cfg/_finished" "$cfg/_failed" "$cfg/_requeued"
-touch "$cfg/_running"
+echo $SLURM_JOB_ID > "$cfg/_running"
 
 . "$prolog"
 
