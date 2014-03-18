@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# If no cpu precision is specified and job prefers gpu, then use 32 bit
+# precision for consistency.
+if ( [ "$xpu_twin" != "0" ] && [ "$CPU_PRECISION" == "" ] ) ; then
+    CPU_PRECISION=32
+fi
+
 if [ "$device" == "cpu" ] ; then
     if ( [ "$CPU_PRECISION" == "" ] || [ "$CPU_PRECISION" == "64" ] ) ; then
         export GNUMPY_CPU_PRECISION=64
