@@ -26,7 +26,6 @@ class Configuration(object):
 
         self.runner = None
         self.input_files = []
-        self.output_files = []
         self.log_file = "output.txt"
         self.gpu = 'no'
         self.slurm_options = []
@@ -47,8 +46,6 @@ class Configuration(object):
                         self.runner = value
                     elif name == "input-files":
                         self.input_files = arg_split(value)
-                    elif name == "output-files":
-                        self.output_files = arg_split(value)
                     elif name == "log-file":
                         self.log_file = value
                     elif name == "gpu":
@@ -72,11 +69,12 @@ class Configuration(object):
 
 
 class JobSubmitter(object):
-    def __init__(self, script=None, cfg_files=[], update=False, log_file=None, slurm_options=None, gpu=None,
-                 prolog=None):
+    def __init__(self, script=None, cfg_files=[], update=False, retry_failed=False,
+                 log_file=None, slurm_options=None, gpu=None, prolog=None):
         self.script = script
         self.cfg_files = cfg_files
         self.update = update
+        self.retry_failed = retry_failed
         self.log_file = log_file
         self.slurm_options = slurm_options
         self.gpu = gpu
@@ -166,16 +164,19 @@ class JobSubmitter(object):
         input_files.append(cfg_filename)
         self.check_file_existance(directory, input_files)
 
-        # output files
-        output_files = cfg.output_files[:]
-        output_files.append(log_file)
-
         # check modification times if update is specified
-        input_mtimes = self.get_mtimes(directory, input_files, ignore_missing=False)
-        output_mtimes = self.get_mtimes(directory, output_files, ignore_missing=True)
-        if len(input_mtimes) > 0 and len(output_mtimes) > 0:
-            if self.update and min(output_mtimes) > max(input_mtimes):
-                raise SubmissionError("output is up to date")
+        if self.update:
+            input_mtimes = self.get_mtimes(directory, input_files, ignore_missing=False)
+            most_recent_input = max(input_mtimes)
+
+            fail_filename = os.path.join(directory, "_failed")
+            if (os.path.exists(fail_filename) and os.path.getmtime(fail_filename) >= most_recent_input and
+                    not self.retry_failed):
+                raise SubmissionError("failed previously")
+
+            finished_filename = os.path.join(directory, "_finished")
+            if os.path.exists(finished_filename) and os.path.getmtime(finished_filename) >= most_recent_input:
+                raise SubmissionError("current")
 
         # slurm options
         slurm_options = self.slurm_options[:]
@@ -251,6 +252,8 @@ def run():
                             help="directories to submit")
     arg_parser.add_argument("--update", "-u", action='store_true',
                             help="only submit job if input is more recent than output")
+    arg_parser.add_argument("--retry-failed", "-r", action='store_true',
+                            help="retry previously failed, unchanged configurations if --update is specified")
     arg_parser.add_argument("--cfg-files", "-c", default=cfg_parser.get("DEFAULT", "cfg-files"),
                             help="configuration files for each job")
     arg_parser.add_argument("--log-file", "-l",
@@ -293,6 +296,7 @@ def run():
         js = JobSubmitter(script=os.path.join(mydir, "job-script.sh"),
                           cfg_files=arg_split(args.cfg_files, ","),
                           update=args.update,
+                          retry_failed=args.retry_failed,
                           log_file=args.log_file,
                           slurm_options=slurm_options,
                           gpu=args.gpu,
