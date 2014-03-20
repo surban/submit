@@ -16,6 +16,7 @@ cfg="$2"
 device="$3"
 xpu_twin="$4"
 prolog="$5"
+shift 5
 
 echo "Job id is $SLURM_JOB_ID"
 echo "Hostname is $(hostname)"
@@ -23,9 +24,9 @@ echo "Device is $device"
 
 if [ "$SLURM_RESTART_COUNT" != "" ] ; then
     echo "Restart count is $SLURM_RESTART_COUNT"
-    cont="continue"
+    export JOB_REQUEUED="yes"
 else
-    cont=""
+    export JOB_REQUEUED="no"
 
     # handle GPU prefered jobs
     if [ "$xpu_twin" != "0" ] ; then
@@ -59,10 +60,10 @@ echo $SLURM_JOB_ID > "$cfg/_running"
 
 echo
 echo "Execution directory is $(pwd)"
-echo $runner "$cfg" "$cont"
+echo $runner "$cfg" "$@"
 echo
 
-srun $runner "$cfg" "$cont"
+srun $runner "$cfg" "$@"
 retval=$?
 
 rm -f "$cfg/_running"

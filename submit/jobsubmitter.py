@@ -28,7 +28,9 @@ class Configuration(object):
         self.input_files = []
         self.log_file = "output.txt"
         self.gpu = 'no'
-        self.slurm_options = []
+        self.slurm_options = None
+        self.slurm_options_gpu = None
+        self.slurm_options_cpu = None
 
         self.parse()
         self.parse_slurm_options()
@@ -61,8 +63,20 @@ class Configuration(object):
     def parse_slurm_options(self):
         """Reads SBATCH options from the specified configuration file."""
         self.slurm_options = []
+        self.slurm_options_gpu = []
+        self.slurm_options_cpu = []
         with open(self.cfg_path, 'r') as f:
             for line in f.readlines():
+                m = re.match(r"^#\s*SBATCH GPU (.*)$", line)
+                if m is not None:
+                    self.slurm_options_gpu.append(m.group(1).strip())
+                    continue
+
+                m = re.match(r"^#\s*SBATCH CPU (.*)$", line)
+                if m is not None:
+                    self.slurm_options_cpu.append(m.group(1).strip())
+                    continue
+
                 m = re.match(r"^#\s*SBATCH (.*)$", line)
                 if m is not None:
                     self.slurm_options.append(m.group(1).strip())
@@ -70,7 +84,7 @@ class Configuration(object):
 
 class JobSubmitter(object):
     def __init__(self, script=None, cfg_files=[], update=False, retry_failed=False,
-                 log_file=None, slurm_options=None, gpu=None, prolog=None):
+                 log_file=None, slurm_options=None, gpu=None, prolog=None, options=[]):
         self.script = script
         self.cfg_files = cfg_files
         self.update = update
@@ -79,6 +93,7 @@ class JobSubmitter(object):
         self.slurm_options = slurm_options
         self.gpu = gpu
         self.prolog = prolog
+        self.options = options
 
         log.debug("Using job batch script %s" % self.script)
         log.debug("Using slurm options: %s" % str(self.slurm_options))
@@ -114,6 +129,7 @@ class JobSubmitter(object):
         cmd = ["sbatch", "--job-name=" + job_name, "--output=" + log_path]
         cmd += opts
         cmd += [self.script, runner, cfg, device, str(xpu_twin), self.prolog]
+        cmd += self.options
 
         log.debug("Executing: " + " ".join(cmd))
         try:
@@ -181,6 +197,9 @@ class JobSubmitter(object):
         # slurm options
         slurm_options = self.slurm_options[:]
         slurm_options += cfg.slurm_options
+        cpu_options = slurm_options[:] + cfg.slurm_options_cpu
+        gpu_options = slurm_options[:] + cfg.slurm_options_gpu
+        gpu_options.append("--gres=gpu")
 
         # gpu
         if self.gpu:
@@ -196,19 +215,16 @@ class JobSubmitter(object):
         cpu_job_id = None
 
         if gpu == 'yes':
-            slurm_options.append("--gres=gpu")
-            gpu_job_id = self.submit_job(directory, log_path, slurm_options, cfg.runner, directory, 'gpu', 0)
+            gpu_job_id = self.submit_job(directory, log_path, gpu_options, cfg.runner, directory, 'gpu', 0)
         elif gpu == 'no':
-            cpu_job_id = self.submit_job(directory, log_path, slurm_options, cfg.runner, directory, 'cpu', 0)
+            cpu_job_id = self.submit_job(directory, log_path, cpu_options, cfg.runner, directory, 'cpu', 0)
         elif gpu == 'prefer':
-            slurm_options.append("--hold")
-
-            gpu_options = slurm_options[:]
-            gpu_options.append("--gres=gpu")
+            cpu_options.append("--hold")
+            gpu_options.append("--hold")
 
             while True:
                 # submit dummy job to get current slurm job id
-                dummy_id = self.submit_job(directory + "_dummy", log_path, slurm_options, cfg.runner, directory, 'cpu', 0)
+                dummy_id = self.submit_job(directory + "_dummy", log_path, cpu_options, cfg.runner, directory, 'cpu', 0)
                 gpu_job_id = dummy_id + 1
                 cpu_job_id = dummy_id + 2
                 log.debug("Dummy job id is %d, expecting gpu jobid=%d and cpu jobid=%d" %
@@ -216,7 +232,7 @@ class JobSubmitter(object):
 
                 gpu_job_id_real = self.submit_job(directory + "(gpu)", log_path, gpu_options,
                                                   cfg.runner, directory, 'gpu', cpu_job_id)
-                cpu_job_id_real = self.submit_job(directory + "(cpu)", log_path, slurm_options,
+                cpu_job_id_real = self.submit_job(directory + "(cpu)", log_path, cpu_options,
                                                   cfg.runner, directory, 'cpu', gpu_job_id)
                 log.debug("Got gpu jobid=%d and cpu jobid=%d" %
                           (gpu_job_id_real, cpu_job_id_real))
@@ -275,6 +291,9 @@ def run():
                             default=cfg_parser.get("DEFAULT", "prolog"),
                             help="script that should be sourced before executing the task. "
                                  "Specify 'none' for no prolog script.")
+    arg_parser.add_argument("--option", "-o", default=[], action='append',
+                            help="additional argument that should be passed to the runner "
+                                 "(specify multiple times for more than one option)")
     arg_parser.add_argument("--debug", action='store_true',
                             help="displays debug output")
     args = arg_parser.parse_args()
@@ -300,7 +319,8 @@ def run():
                           log_file=args.log_file,
                           slurm_options=slurm_options,
                           gpu=args.gpu,
-                          prolog=prolog)
+                          prolog=prolog,
+                          options=args.option)
     except SubmissionError as e:
         print e.message
         sys.exit(1)
