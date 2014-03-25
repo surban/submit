@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --signal=INT@300
+#SBATCH --signal=INT@600
 #SBATCH --open-mode=append
 
 function get_job_state {
