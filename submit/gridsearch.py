@@ -37,7 +37,7 @@ class GridSearch(object):
                     val = []
                     for e in rng_spec:
                         if isinstance(e, basestring):
-                            val.extend(self._parse_rng_str(rng_spec))
+                            val.extend(self._parse_rng_str(e))
                         else:
                             val.append(e)
                 parameters[p.upper()] = val
@@ -72,6 +72,8 @@ class GridSearch(object):
             try:
                 return [float(rng_str)]
             except ValueError:
+                return [rng_str]
+            except TypeError:
                 return [rng_str]
 
     def _get_used_parameters(self):
@@ -133,6 +135,7 @@ class GridSearch(object):
 
 def gridsearch(name, template, parameter_ranges):
     GridSearch(name, template, parameter_ranges).generate()
+    # GridSearch(name, template, parameter_ranges)
 
 
 def remove_index_dirs():
