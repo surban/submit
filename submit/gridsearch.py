@@ -119,7 +119,7 @@ class GridSearch(object):
 
         for p_vals in self._generate_rec(plist):
             cfg_index += 1
-            p_vals["CFG_INDEX"] = "%03d" % cfg_index
+            p_vals["CFG_INDEX"] = "%05d" % cfg_index
 
             name = self._instantiate(self._name, p_vals)
             data = self._instantiate(self._template, p_vals)
